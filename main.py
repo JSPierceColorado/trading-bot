@@ -27,34 +27,26 @@ def get_buying_power(api):
 def get_toppicks_with_signal(ws):
     rows = ws.get_all_values()
     header = rows[0]
-    print("DEBUG: Sheet header:", header)
     try:
         top_pick_idx = header.index("TopPick")
         bullish_idx = header.index("Bullish Signal")
         ticker_idx = header.index("Ticker")
         price_idx = header.index("Price")
-    except Exception as e:
-        print("❌ Column error:", e)
+    except Exception:
         return []
 
     picks = []
-    for i, row in enumerate(rows[1:], 2):
-        print(f"DEBUG: Row {i}: {row}")
+    for row in rows[1:]:
         try:
             top_pick = row[top_pick_idx].strip() if row[top_pick_idx] else ""
             bullish = row[bullish_idx].strip() if row[bullish_idx] else ""
             ticker = row[ticker_idx].strip() if row[ticker_idx] else ""
             price_raw = row[price_idx].strip() if row[price_idx] else ""
-            try:
-                price = float(price_raw)
-            except Exception:
-                price = None
-            print(f"  ↳ Checking: TopPick='{top_pick}', Bullish Signal='{bullish}', Ticker='{ticker}', Price='{price}'")
+            price = float(price_raw) if price_raw else None
             if top_pick.upper().startswith("TOP") and bullish == "✅":
                 picks.append({"ticker": ticker, "price": price})
-                print(f"    ✔ Eligible: {ticker} at {price}")
-        except Exception as e:
-            print(f"❌ Row {i} error: {e}")
+        except Exception:
+            continue
     return picks
 
 def submit_order(api, symbol, notional):
@@ -73,21 +65,17 @@ def submit_order(api, symbol, notional):
 def main():
     print("🚦 Starting trading bot...")
 
-    # Set up Google client & worksheet
     gc = get_google_client()
     screener_ws = gc.open(SHEET_NAME).worksheet(SCREENER_TAB)
     log_ws = gc.open(SHEET_NAME).worksheet(LOG_TAB)
 
-    # Set up Alpaca
     api = REST(APCA_API_KEY_ID, APCA_API_SECRET_KEY, APCA_API_BASE_URL, api_version='v2')
     buying_power = get_buying_power(api)
     print(f"💵 Buying power: {buying_power:.2f}")
 
-    # Get eligible trades (with extra debug)
     picks = get_toppicks_with_signal(screener_ws)
     print(f"🟢 Found {len(picks)} eligible Top Picks with Bullish Signal.")
 
-    # Place trades and log
     for pick in picks:
         symbol = pick["ticker"]
         price = pick["price"]
