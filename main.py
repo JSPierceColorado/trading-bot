@@ -49,18 +49,54 @@ def get_toppicks_with_signal(ws):
             continue
     return picks
 
-def submit_order(api, symbol, notional):
+def submit_order(api, symbol, notional=None, qty=None, side='buy'):
     try:
-        order = api.submit_order(
-            symbol=symbol,
-            notional=notional,
-            side='buy',
-            type='market',
-            time_in_force='day'
-        )
+        if side == 'buy':
+            order = api.submit_order(
+                symbol=symbol,
+                notional=notional,
+                side='buy',
+                type='market',
+                time_in_force='day'
+            )
+        elif side == 'sell':
+            order = api.submit_order(
+                symbol=symbol,
+                qty=qty,
+                side='sell',
+                type='market',
+                time_in_force='day'
+            )
+        else:
+            raise ValueError("Invalid order side")
         return order.id, True, ""
     except Exception as e:
         return None, False, str(e)
+
+def check_and_sell_positions(api, log_ws, target_profit=0.05):
+    print("🔎 Checking open positions for ≥5% gains...")
+    positions = api.list_positions()
+    for pos in positions:
+        symbol = pos.symbol
+        qty = float(pos.qty)
+        avg_entry = float(pos.avg_entry_price)
+        current_price = float(pos.current_price)
+        if qty <= 0:
+            continue
+        gain = (current_price - avg_entry) / avg_entry
+        if gain >= target_profit:
+            print(f"💰 Selling {qty} shares of {symbol} at {current_price:.2f} (+{gain*100:.2f}%)")
+            order_id, success, error = submit_order(api, symbol, qty=qty, side='sell')
+            now = datetime.now().isoformat(timespec="seconds")
+            log_row = [
+                now, symbol, "sell", "", current_price,
+                order_id if order_id else "",
+                "success" if success else "fail",
+                error
+            ]
+            log_trade(log_ws, log_row)
+            print(f"   ↳ {'✅' if success else '❌'} Sell order {'submitted' if success else 'failed'}: {order_id if order_id else error}")
+            time.sleep(2)
 
 def main():
     print("🚦 Starting trading bot...")
@@ -72,6 +108,9 @@ def main():
     api = REST(APCA_API_KEY_ID, APCA_API_SECRET_KEY, APCA_API_BASE_URL, api_version='v2')
     buying_power = get_buying_power(api)
     print(f"💵 Buying power: {buying_power:.2f}")
+
+    # First, sell positions with ≥5% gain
+    check_and_sell_positions(api, log_ws, target_profit=0.05)
 
     picks = get_toppicks_with_signal(screener_ws)
     print(f"🟢 Found {len(picks)} eligible Top Picks with Bullish Signal.")
@@ -85,8 +124,17 @@ def main():
             print(f"⚠️ Skipping {symbol}: invalid notional or price.")
             continue
 
+        # Check if position already exists
+        try:
+            position = api.get_position(symbol)
+            if float(position.qty) > 0:
+                print(f"⚠️ Skipping {symbol}: already held in portfolio.")
+                continue
+        except Exception:
+            pass  # No position, safe to trade
+
         print(f"🛒 Submitting order for {symbol} at ${notional} notional (market order)")
-        order_id, success, error = submit_order(api, symbol, notional)
+        order_id, success, error = submit_order(api, symbol, notional=notional, side='buy')
         now = datetime.now().isoformat(timespec="seconds")
         log_row = [
             now, symbol, "buy", notional, price if price else "",
@@ -95,7 +143,7 @@ def main():
             error
         ]
         log_trade(log_ws, log_row)
-        print(f"   ↳ {'✅' if success else '❌'} Order {'submitted' if success else 'failed'}: {order_id if order_id else error}")
+        print(f"   ↳ {'✅' if success else '❌'} Buy order {'submitted' if success else 'failed'}: {order_id if order_id else error}")
         time.sleep(2)
 
     print("✅ Done submitting orders!")
