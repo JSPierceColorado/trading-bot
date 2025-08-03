@@ -2,14 +2,13 @@ import os
 import json
 import time
 import gspread
-from alpaca_trade_api.rest import REST, TimeFrame
+from alpaca_trade_api.rest import REST
 from datetime import datetime
 
 SHEET_NAME = "Trading Log"
 SCREENER_TAB = "screener"
 LOG_TAB = "log"
 
-# Alpaca credentials (should be set as environment variables)
 APCA_API_KEY_ID = os.getenv("APCA_API_KEY_ID")
 APCA_API_SECRET_KEY = os.getenv("APCA_API_SECRET_KEY")
 APCA_API_BASE_URL = os.getenv("APCA_API_BASE_URL", "https://api.alpaca.markets")  # live by default
@@ -28,23 +27,34 @@ def get_buying_power(api):
 def get_toppicks_with_signal(ws):
     rows = ws.get_all_values()
     header = rows[0]
-    top_pick_idx = header.index("TopPick") if "TopPick" in header else None
-    bullish_idx = header.index("Bullish Signal") if "Bullish Signal" in header else None
-    ticker_idx = header.index("Ticker") if "Ticker" in header else None
-    price_idx = header.index("Price") if "Price" in header else None
+    print("DEBUG: Sheet header:", header)
+    try:
+        top_pick_idx = header.index("TopPick")
+        bullish_idx = header.index("Bullish Signal")
+        ticker_idx = header.index("Ticker")
+        price_idx = header.index("Price")
+    except Exception as e:
+        print("❌ Column error:", e)
+        return []
 
-    # Find all that are both TopPick and have bullish signal
     picks = []
-    for row in rows[1:]:
-        if not (top_pick_idx and bullish_idx and ticker_idx and price_idx):
-            continue
-        if row[top_pick_idx].strip().upper().startswith("TOP") and row[bullish_idx].strip() == "✅":
-            ticker = row[ticker_idx].strip()
+    for i, row in enumerate(rows[1:], 2):
+        print(f"DEBUG: Row {i}: {row}")
+        try:
+            top_pick = row[top_pick_idx].strip() if row[top_pick_idx] else ""
+            bullish = row[bullish_idx].strip() if row[bullish_idx] else ""
+            ticker = row[ticker_idx].strip() if row[ticker_idx] else ""
+            price_raw = row[price_idx].strip() if row[price_idx] else ""
             try:
-                price = float(row[price_idx].strip())
+                price = float(price_raw)
             except Exception:
                 price = None
-            picks.append({"ticker": ticker, "price": price})
+            print(f"  ↳ Checking: TopPick='{top_pick}', Bullish Signal='{bullish}', Ticker='{ticker}', Price='{price}'")
+            if top_pick.upper().startswith("TOP") and bullish == "✅":
+                picks.append({"ticker": ticker, "price": price})
+                print(f"    ✔ Eligible: {ticker} at {price}")
+        except Exception as e:
+            print(f"❌ Row {i} error: {e}")
     return picks
 
 def submit_order(api, symbol, notional):
@@ -73,7 +83,7 @@ def main():
     buying_power = get_buying_power(api)
     print(f"💵 Buying power: {buying_power:.2f}")
 
-    # Get eligible trades
+    # Get eligible trades (with extra debug)
     picks = get_toppicks_with_signal(screener_ws)
     print(f"🟢 Found {len(picks)} eligible Top Picks with Bullish Signal.")
 
@@ -98,7 +108,6 @@ def main():
         ]
         log_trade(log_ws, log_row)
         print(f"   ↳ {'✅' if success else '❌'} Order {'submitted' if success else 'failed'}: {order_id if order_id else error}")
-        # Optional: small delay between orders
         time.sleep(2)
 
     print("✅ Done submitting orders!")
