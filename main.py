@@ -11,7 +11,9 @@ LOG_TAB = "log"
 
 APCA_API_KEY_ID = os.getenv("APCA_API_KEY_ID")
 APCA_API_SECRET_KEY = os.getenv("APCA_API_SECRET_KEY")
-APCA_API_BASE_URL = os.getenv("APCA_API_BASE_URL", "https://api.alpaca.markets")  # live by default
+APCA_API_BASE_URL = os.getenv("APCA_API_BASE_URL", "https://api.alpaca.markets")
+DIVIDEND_SYMBOL = "VIG"
+MIN_VIG_BUY = 1.00  # Only submit VIG buy order if proceeds ≥ $1
 
 def get_google_client():
     creds = json.loads(os.getenv("GOOGLE_CREDS_JSON"))
@@ -74,21 +76,44 @@ def submit_order(api, symbol, notional=None, qty=None, side='buy'):
         return None, False, str(e)
 
 def has_open_buy_order(api, symbol):
-    # Looks for open buy orders for this symbol
     open_orders = api.list_orders(status='open', symbols=[symbol])
     for order in open_orders:
         if order.side == 'buy':
             return True
     return False
 
+def get_vig_funds(log_ws):
+    # Looks for "VIG_FUNDS" in column 1 and returns its value
+    try:
+        records = log_ws.get_all_values()
+        for row in records:
+            if len(row) >= 2 and row[0] == "VIG_FUNDS":
+                return float(row[1])
+    except Exception:
+        pass
+    return 0.0
+
+def set_vig_funds(log_ws, funds):
+    # Upsert "VIG_FUNDS" in first matching row, or append if not found
+    records = log_ws.get_all_values()
+    for idx, row in enumerate(records):
+        if len(row) >= 2 and row[0] == "VIG_FUNDS":
+            log_ws.update_cell(idx+1, 2, funds)
+            return
+    # If not found, append at end
+    log_ws.append_row(["VIG_FUNDS", funds], value_input_option="USER_ENTERED")
+
 def check_and_sell_positions(api, log_ws, target_profit=0.05):
     print("🔎 Checking open positions for ≥5% gains...")
     positions = api.list_positions()
+    cumulative_profits = get_vig_funds(log_ws)
     for pos in positions:
         symbol = pos.symbol
         qty = float(pos.qty)
         avg_entry = float(pos.avg_entry_price)
         current_price = float(pos.current_price)
+        if symbol == DIVIDEND_SYMBOL:
+            continue  # Never sell VIG
         if qty <= 0:
             continue
         gain = (current_price - avg_entry) / avg_entry
@@ -103,8 +128,33 @@ def check_and_sell_positions(api, log_ws, target_profit=0.05):
                 error
             ]
             log_trade(log_ws, log_row)
+            # Add proceeds to cumulative profits if successful
+            if success:
+                proceeds = round(qty * current_price, 2)
+                cumulative_profits += proceeds
             print(f"   ↳ {'✅' if success else '❌'} Sell order {'submitted' if success else 'failed'}: {order_id if order_id else error}")
             time.sleep(2)
+    # After loop: if cumulative profits > $1, invest in VIG
+    if cumulative_profits >= MIN_VIG_BUY:
+        if not has_open_buy_order(api, DIVIDEND_SYMBOL):
+            print(f"🏦 Reinvesting ${cumulative_profits:.2f} into {DIVIDEND_SYMBOL}")
+            vig_order_id, vig_success, vig_error = submit_order(
+                api, DIVIDEND_SYMBOL, notional=round(cumulative_profits, 2), side='buy'
+            )
+            now2 = datetime.now().isoformat(timespec="seconds")
+            log_row2 = [
+                now2, DIVIDEND_SYMBOL, "buy", round(cumulative_profits, 2), "",
+                vig_order_id if vig_order_id else "",
+                "success" if vig_success else "fail",
+                vig_error
+            ]
+            log_trade(log_ws, log_row2)
+            if vig_success:
+                cumulative_profits = 0.0  # Reset on success
+            print(f"   ↳ {'✅' if vig_success else '❌'} VIG buy {'submitted' if vig_success else 'failed'}: {vig_order_id if vig_order_id else vig_error}")
+        else:
+            print(f"⚠️ Skipped VIG buy: outstanding buy order exists.")
+    set_vig_funds(log_ws, round(cumulative_profits, 2))
 
 def main():
     print("🚦 Starting trading bot...")
@@ -117,7 +167,7 @@ def main():
     buying_power = get_buying_power(api)
     print(f"💵 Buying power: {buying_power:.2f}")
 
-    # First, sell positions with ≥5% gain
+    # First, sell positions with ≥5% gain and reinvest in VIG if proceeds ≥ $1
     check_and_sell_positions(api, log_ws, target_profit=0.05)
 
     picks = get_toppicks_with_signal(screener_ws)
@@ -125,8 +175,8 @@ def main():
 
     for pick in picks:
         symbol = pick["ticker"]
-        if not symbol:
-            continue
+        if not symbol or symbol == DIVIDEND_SYMBOL:
+            continue  # Don't auto-buy VIG in screener loop
         price = pick["price"]
         notional = round(0.05 * buying_power, 2) if buying_power else None
 
