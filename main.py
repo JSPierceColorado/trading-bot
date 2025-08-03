@@ -73,6 +73,14 @@ def submit_order(api, symbol, notional=None, qty=None, side='buy'):
     except Exception as e:
         return None, False, str(e)
 
+def has_open_buy_order(api, symbol):
+    # Looks for open buy orders for this symbol
+    open_orders = api.list_orders(status='open', symbols=[symbol])
+    for order in open_orders:
+        if order.side == 'buy':
+            return True
+    return False
+
 def check_and_sell_positions(api, log_ws, target_profit=0.05):
     print("🔎 Checking open positions for ≥5% gains...")
     positions = api.list_positions()
@@ -117,10 +125,12 @@ def main():
 
     for pick in picks:
         symbol = pick["ticker"]
+        if not symbol:
+            continue
         price = pick["price"]
         notional = round(0.05 * buying_power, 2) if buying_power else None
 
-        if not symbol or notional is None or notional < 1:
+        if notional is None or notional < 1:
             print(f"⚠️ Skipping {symbol}: invalid notional or price.")
             continue
 
@@ -132,6 +142,11 @@ def main():
                 continue
         except Exception:
             pass  # No position, safe to trade
+
+        # Check if there is an outstanding buy order for this symbol
+        if has_open_buy_order(api, symbol):
+            print(f"⚠️ Skipping {symbol}: outstanding buy order exists.")
+            continue
 
         print(f"🛒 Submitting order for {symbol} at ${notional} notional (market order)")
         order_id, success, error = submit_order(api, symbol, notional=notional, side='buy')
